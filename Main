@@ -1,0 +1,148 @@
+#include <PID_v1.h>
+#include <Wire.h>
+#include <MPU6050.h>
+#include <Kalman.h>
+#include <AccelStepper.h>
+#include "BluetoothSerial.h"
+
+BluetoothSerial SerialBT;
+
+// MPU6050 sensor
+MPU6050 mpu;
+Kalman kalmanX;
+
+// Stepper motor pins (A4988)
+#define MOTOR_L_STEP 26
+#define MOTOR_L_DIR  25
+#define MOTOR_R_STEP 14
+#define MOTOR_R_DIR  27
+
+AccelStepper motorL(1, MOTOR_L_STEP, MOTOR_L_DIR);
+AccelStepper motorR(1, MOTOR_R_STEP, MOTOR_R_DIR);
+
+// Kalman filter and IMU variables
+unsigned long timer;
+float kalAngleX = 0.0;
+
+// Must use int16_t for MPU6050 compatibility
+int16_t accX, accY, accZ;
+int16_t gyroX, gyroY, gyroZ;
+//////////////////////////////////////////////////////////////////////////////
+double Setpoint, Input, Output;
+
+//Specify the links and initial tuning parameters
+double Kp=2, Ki=5, Kd=1;
+PID myPID(&Input, &Output, &Setpoint, Kp, Ki, Kd, DIRECT);
+///////////////////////////////////////////////////////////////////////////
+
+void setup() {
+  Serial.begin(115200);
+  SerialBT.begin("SelfBalancingBot");
+  Wire.begin();
+
+  // Initialize MPU6050
+  mpu.initialize();
+  if (!mpu.testConnection()) {
+    Serial.println("MPU6050 connection failed!");
+    while (1); // Stop if sensor not connected
+  }
+
+  // Setup motors
+  motorL.setMaxSpeed(15000);
+  motorR.setMaxSpeed(15000);
+  motorL.setAcceleration(15000);
+  motorR.setAcceleration(15000);
+
+  // Read initial angle from accelerometer for Kalman filter
+  mpu.getAcceleration(&accX, &accY, &accZ);
+  float roll = atan2((float)accY, (float)accZ) * 180.0 / PI;
+  kalmanX.setAngle(roll);
+
+  timer = micros();
+  Serial.println("Setup Complete");
+//////////////////////////////////////////////////////////////////////
+
+  Setpoint = -0.6;
+
+  //turn the PID on
+  myPID.SetMode(AUTOMATIC);
+  myPID.SetOutputLimits(-15000, 15000);
+
+////////////////////////////////////////////////////////////////////
+}
+
+void loop() {
+  // Read raw accelerometer and gyro values
+  handleBluetoothTuning();
+  mpu.getAcceleration(&accX, &accY, &accZ);
+  mpu.getRotation(&gyroX, &gyroY, &gyroZ);
+
+  // Calculate delta time
+  float dt = (float)(micros() - timer) / 1000000.0;
+  timer = micros();
+
+  // Calculate angle using Kalman filter
+  float roll = atan2((float)accY, (float)accZ) * 180.0 / PI;
+  float gyroRateX = (float)gyroX / 131.0; // Convert to deg/sec
+  kalAngleX = kalmanX.getAngle(roll, gyroRateX, dt);
+  Serial.println(kalAngleX);
+
+  // // Debug to Serial and Bluetooth
+  // Serial.print("speed ");
+  // Serial.println(Output);
+  // SerialBT.print("Speed: ");
+  // SerialBT.println(Output);
+
+  // // Basic control (replace with PID later)
+  // float threshold = 3.0; // degrees dead zone
+  // if (kalAngleX > threshold) {
+  //   motorL.setSpeed(Output);  motorL.runSpeed();
+  //   motorR.setSpeed(Output);  motorR.runSpeed();
+  // } else if (kalAngleX < -threshold) {
+  //   motorL.setSpeed(Output); motorL.runSpeed();
+  //   motorR.setSpeed(Output); motorR.runSpeed();
+  // } else {
+  //   motorL.setSpeed(0);    motorL.runSpeed();
+  //   motorR.setSpeed(0);    motorR.runSpeed();
+  // }
+  // //////////////////////////////////////////////////////////////////
+  // myPID.Compute();
+  // ////////////////////////////////////////////////////////////////
+
+  // delay(5); // Short delay for stability
+}
+
+void handleBluetoothTuning() {
+  if (SerialBT.available()) {
+    String incoming = SerialBT.readStringUntil('\n');
+
+    if (incoming.length() > 1) {
+      char cmd = tolower(incoming.charAt(0));
+      float value = incoming.substring(1).toFloat();
+
+      switch (cmd) {
+        case 'p':
+          Kp = value;
+          myPID.SetTunings(Kp, Ki, Kd);
+          break;
+        case 'i':
+          Ki = value;
+          myPID.SetTunings(Kp, Ki, Kd);
+          break;
+        case 'd':
+          Kd = value;
+          myPID.SetTunings(Kp, Ki, Kd);
+          break;
+        default:
+          SerialBT.println("Use: p#, i#, d#");
+      }
+    } else {
+      SerialBT.println("Invalid input");
+    }
+
+    SerialBT.print("Kp: "); SerialBT.print(Kp, 2);
+    SerialBT.print(" | Ki: "); SerialBT.print(Ki, 2);
+    SerialBT.print(" | Kd: "); SerialBT.println(Kd, 2);
+  }
+  myPID.SetTunings(Kp,Ki,Kd);
+}
